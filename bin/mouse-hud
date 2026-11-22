@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Launch the Mouse Driver HUD on the local X display.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export DISPLAY="${DISPLAY:-:0}"
+export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
+exec /usr/bin/python3 "$ROOT/hud/hud.py" "$@"

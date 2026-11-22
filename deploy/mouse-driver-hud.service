@@ -1,0 +1,17 @@
+[Unit]
+Description=Mouse Driver HUD (GTK3 always-on-top telemetry panel)
+Documentation=file://%h/mouse-driver/README.md
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=%h/.Xauthority
+WorkingDirectory=%h/mouse-driver
+ExecStart=/usr/bin/python3 %h/mouse-driver/hud/hud.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

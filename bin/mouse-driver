@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Mouse Driver CLI.
+
+    mouse-driver status | arm [ttl] | disarm | stop | panic | lock | unlock
+    mouse-driver pause | resume | toggle
+    mouse-driver move X Y
+    mouse-driver click [X Y] [--button left] [--count 1]
+    mouse-driver demo
+    mouse-driver serve
+
+State is shared with the MCP server through ``data/armed.json``, so arming from
+the terminal arms the agent's session too. ``serve`` runs the stdio MCP server.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+VENV = ROOT / ".venv" / "bin" / "python"
+if VENV.exists() and Path(sys.executable).resolve() != VENV.resolve():
+    os.execv(str(VENV), [str(VENV), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+sys.path.insert(0, str(ROOT))
+
+from mouse_driver.control import get_service  # noqa: E402
+from mouse_driver.guard import GuardError  # noqa: E402
+
+
+def emit(payload: dict) -> None:
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="mouse-driver", description="Human-shaped pointer control for trinity")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    arm = sub.add_parser("arm", help="arm the driver for a time-boxed window")
+    arm.add_argument("ttl", nargs="?", type=int, default=300)
+
+    sub.add_parser("disarm", help="disarm without the STOP sentinel")
+    sub.add_parser("stop", help="emergency stop: sentinel + disarm (no lock)")
+    sub.add_parser("panic", help="hard stop: sentinel, disarm and LOCK arming")
+    sub.add_parser("lock", help="lock arming (only Ctrl+Alt+Shift+Enter clears it)")
+    sub.add_parser("unlock", help="clear the operator lock (leaves the driver disarmed)")
+    sub.add_parser("pause", help="pause motion and hold position (TTL keeps running)")
+    sub.add_parser("resume", help="resume a paused session")
+    sub.add_parser("toggle", help="pause or resume depending on the current state")
+    sub.add_parser("keyboard", help="expand or collapse the overlay keyboard")
+
+    hud = sub.add_parser("hud", help="show, hide or toggle the HUD panel")
+    hud.add_argument("action", choices=["show", "hide", "toggle", "reset", "scale"])
+    hud.add_argument("value", nargs="?", type=float, help="scale factor 0.85–1.8 for 'scale'")
+
+    key = sub.add_parser("key", help="send one key combination (xdotool syntax)")
+    key.add_argument("combo")
+    type_cmd = sub.add_parser("type", help="type text with the human-shaped key timing")
+    type_cmd.add_argument("text")
+    sub.add_parser("status", help="arming state, cursor, screen and session totals")
+
+    move = sub.add_parser("move", help="move the pointer")
+    move.add_argument("x", type=int)
+    move.add_argument("y", type=int)
+    move.add_argument("--duration", type=float, default=None)
+
+    click = sub.add_parser("click", help="click, optionally at a position")
+    click.add_argument("xy", nargs="*", type=int)
+    click.add_argument("--button", default="left", choices=["left", "middle", "right"])
+    click.add_argument("--count", type=int, default=1)
+
+    sub.add_parser("demo", help="visible scripted demonstration (moves only, no clicks)")
+    serve = sub.add_parser("serve", help="run the stdio MCP server")
+    serve.add_argument("--api", action="store_true", help="also start the telemetry API (default with serve)")
+
+    args = parser.parse_args(argv)
+
+    if args.command == "serve":
+        from mouse_driver.mcp_server import main as serve_main
+
+        serve_main()
+        return 0
+
+    # Short-lived CLI processes do not bind the telemetry port; the MCP server
+    # owns it. They still share arming state and the telemetry database.
+    service = get_service(start_api=False)
+
+    try:
+        if args.command == "status":
+            emit(service.status())
+        elif args.command == "arm":
+            emit(service.arm(args.ttl))
+        elif args.command == "disarm":
+            emit(service.disarm())
+        elif args.command == "stop":
+            emit(service.stop())
+        elif args.command == "panic":
+            emit(service.panic())
+        elif args.command == "lock":
+            emit(service.lock())
+        elif args.command == "unlock":
+            emit(service.unlock())
+        elif args.command == "pause":
+            emit(service.pause())
+        elif args.command == "resume":
+            emit(service.resume())
+        elif args.command == "toggle":
+            emit(service.resume() if service.guard.state()["paused"] else service.pause())
+        elif args.command == "keyboard":
+            emit(service.toggle_keyboard())
+        elif args.command == "hud":
+            if args.action == "toggle":
+                emit(service.toggle_hud_visible())
+            elif args.action == "reset":
+                emit(service.reset_hud_position())
+            elif args.action == "scale":
+                if args.value is None:
+                    parser.error("hud scale needs a number, e.g. 1.2")
+                emit(service.set_hud_scale(args.value))
+            else:
+                emit(service.set_hud_visible(args.action == "show"))
+        elif args.command == "key":
+            emit(service.key(args.combo))
+        elif args.command == "type":
+            emit(service.type_text(args.text))
+        elif args.command == "move":
+            emit(service.move(args.x, args.y, args.duration))
+        elif args.command == "click":
+            if len(args.xy) == 2:
+                emit(service.click(args.button, args.count, args.xy[0], args.xy[1]))
+            elif not args.xy:
+                emit(service.click(args.button, args.count))
+            else:
+                parser.error("click takes either no coordinates or exactly X Y")
+        elif args.command == "demo":
+            emit(demo(service))
+    except GuardError as exc:
+        emit(exc.as_dict())
+        return 1
+    except ValueError as exc:
+        emit({"ok": False, "error": str(exc), "code": "bad_argument"})
+        return 1
+    finally:
+        service.close()
+    return 0
+
+
+def demo(service) -> dict:
+    """A visible, harmless demonstration: curved moves and a small orbit."""
+    origin = service.driver.pointer()
+    screen_w, screen_h = service.driver.screen
+    service.guard.arm(60, by="cli demo")
+    service.store.add_event("demo", "start")
+    base_x = min(screen_w - 400, max(400, origin[0]))
+    base_y = min(screen_h - 300, max(300, origin[1]))
+    steps: list[dict] = []
+    try:
+        for offset in ((0, 0), (320, -180), (520, 120), (180, 260), (0, 0)):
+            target_x = min(screen_w - 2, max(1, base_x + offset[0]))
+            target_y = min(screen_h - 2, max(1, base_y + offset[1]))
+            steps.append(service.move(target_x, target_y))
+            time.sleep(0.15)
+        for index in range(36):
+            angle = index / 36 * 6.28318
+            service.driver.move_to(base_x + 90 * math.cos(angle), base_y + 70 * math.sin(angle))
+            time.sleep(1 / 60)
+    finally:
+        service.move(origin[0], origin[1])
+        service.guard.disarm("demo finished")
+    service.store.add_event("demo", "finished")
+    return {"ok": True, "moves": len(steps), "restored": {"x": origin[0], "y": origin[1]}, "detail": steps}
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
