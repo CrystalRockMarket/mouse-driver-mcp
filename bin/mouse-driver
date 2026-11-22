@@ -55,7 +55,11 @@ def main(argv: list[str] | None = None) -> int:
 
     hud = sub.add_parser("hud", help="show, hide or toggle the HUD panel")
     hud.add_argument("action", choices=["show", "hide", "toggle", "reset", "scale"])
-    hud.add_argument("value", nargs="?", type=float, help="scale factor 0.85–1.8 for 'scale'")
+    hud.add_argument("value", nargs="?", type=float, help="scale factor 0.85–2.0 for 'scale'")
+
+    task = sub.add_parser("task", help="set, start, stop or inspect the repeat task")
+    task.add_argument("action", choices=["set", "start", "stop", "status"])
+    task.add_argument("payload", nargs="?", help="JSON task model for 'set', or a path to one")
 
     key = sub.add_parser("key", help="send one key combination (xdotool syntax)")
     key.add_argument("combo")
@@ -112,6 +116,45 @@ def main(argv: list[str] | None = None) -> int:
             emit(service.resume() if service.guard.state()["paused"] else service.pause())
         elif args.command == "keyboard":
             emit(service.toggle_keyboard())
+        elif args.command == "task":
+            import urllib.error
+            import urllib.request
+
+            def api(path: str, payload: dict | None = None) -> dict | None:
+                try:
+                    body = json.dumps(payload).encode() if payload is not None else None
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:8340{path}",
+                        data=body,
+                        method="POST" if payload is not None else "GET",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(req, timeout=3) as response:
+                        return json.loads(response.read().decode())
+                except (urllib.error.URLError, OSError, ValueError):
+                    return None
+
+            if args.action == "set":
+                if not args.payload:
+                    parser.error("task set needs JSON or a JSON file path")
+                if Path(args.payload).is_file():
+                    data = json.loads(Path(args.payload).read_text())
+                else:
+                    data = json.loads(args.payload)
+                via_api = api("/api/task", data)
+                emit(via_api if via_api is not None else service.task_set(data))
+            elif args.action == "start":
+                via_api = api("/api/task/start", {})
+                if via_api is None:
+                    emit({"ok": False, "error": "task start needs the running driver API (127.0.0.1:8340)"})
+                else:
+                    emit(via_api)
+            elif args.action == "stop":
+                via_api = api("/api/task/stop", {})
+                emit(via_api if via_api is not None else service.task_stop())
+            else:
+                via_api = api("/api/task")
+                emit(via_api if via_api is not None else {"ok": True, "task": service.task_model(), "status": service.task_status()})
         elif args.command == "hud":
             if args.action == "toggle":
                 emit(service.toggle_hud_visible())

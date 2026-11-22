@@ -22,7 +22,7 @@ def service():
 def test_scale_clamps_both_ends(service):
     service.set_hud_visible(True)
     big = service.set_hud_scale(5.0)
-    assert big["hud"]["scale"] == pytest.approx(1.8)
+    assert big["hud"]["scale"] == pytest.approx(2.0)
     small = service.set_hud_scale(0.1)
     assert small["hud"]["scale"] == pytest.approx(0.85)
 
@@ -90,3 +90,14 @@ def test_pause_button_mapping():
     assert hud_layout.pause_button(False, False, False)["enabled"] is False
     assert hud_layout.pause_button(True, False, True)["enabled"] is False
     assert hud_layout.pause_button(False, True, False)["enabled"] is False
+
+
+def test_default_scale_is_135_for_missing_file(monkeypatch, tmp_path):
+    import mouse_driver.control as control
+
+    hud = tmp_path / "hud.json"
+    monkeypatch.setattr(control, "HUD_PATH", hud)
+    monkeypatch.setattr(control, "_HUD_CACHE", {"mtime": -1.0, "state": dict(control.HUD_DEFAULTS)})
+    hud.write_text('{"visible": true, "mode": "auto"}')
+    state = control.read_hud_state()
+    assert state["scale"] == pytest.approx(1.35)

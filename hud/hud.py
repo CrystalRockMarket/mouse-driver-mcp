@@ -77,7 +77,7 @@ PAUSE_ACTIVE = "#e8b23c"
 
 def css_for(scale: float) -> str:
     """Every size in the panel derived from one scale factor."""
-    s = max(0.85, min(1.8, float(scale)))
+    s = max(0.85, min(2.0, float(scale)))
 
     def px(value: float) -> str:
         return f"{max(1.0, value * s):.1f}px"
@@ -360,7 +360,7 @@ class Hud(Gtk.Window):
         self._last_publish = 0.0
         self._dragging = False
         self._drag_offset = (0, 0)
-        self._scale = 1.0
+        self._scale = 1.35
         self._interacting: str | None = None
         self._drag_start: tuple[float, float, int, int] | None = None
         self._drag_moved = False
@@ -373,6 +373,11 @@ class Hud(Gtk.Window):
         self._cursor_grabbing = None
         self._hot_until: dict[str, float] = {}
         self._keys_seen: list[dict] = []
+        self._editor_open = False
+        self._task_steps: list[dict] = []
+        self._task_repeat = {"mode": "count", "count": 1, "minutes": 30}
+        self._task_busy = False
+        self._closed_height = 0
 
         self.set_name("hud")
         self.set_default_size(self._width, self._height)
@@ -388,6 +393,7 @@ class Hud(Gtk.Window):
 
         self._apply_css()
         self._build()
+        self._apply_metrics()
         self.connect("destroy", Gtk.main_quit)
         self.connect("size-allocate", lambda *_: self._click_through())
         # The pointer grab delivers motion/release to the toplevel, not the
@@ -407,6 +413,7 @@ class Hud(Gtk.Window):
             gdk_window.set_override_redirect(True)
             gdk_window.set_keep_above(True)
         self.show_all()
+        self.task_scroll.hide()
         if not interactive:
             self.buttons_box.hide()
         self._click_through()
@@ -464,9 +471,11 @@ class Hud(Gtk.Window):
     def _build(self) -> None:
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         outer.set_border_width(8)
+        self.outer = outer
         self.add(outer)
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.header = header
         outer.pack_start(header, False, False, 0)
 
         self.drag_box = Gtk.EventBox()
@@ -511,6 +520,7 @@ class Hud(Gtk.Window):
         self.close_label.set_yalign(0.5)
         self.close_label.set_size_request(18, 18)
         self.close_box.add(self.close_label)
+        self.close_box.set_tooltip_text("Close overlay")
         self.close_box.connect("enter-notify-event", lambda *_: self.close_label.get_style_context().add_class("close-hot"))
         self.close_box.connect("leave-notify-event", lambda *_: self.close_label.get_style_context().remove_class("close-hot"))
         header.pack_start(self.close_box, False, False, 0)
@@ -520,6 +530,7 @@ class Hud(Gtk.Window):
         outer.pack_start(self.target_label, False, False, 0)
 
         live_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.live_row = live_row
         outer.pack_start(live_row, False, False, 0)
         self.live = self._label("0 steps · 0px · 0/0 px/s · idle", "live")
         self.live.set_max_width_chars(46)
@@ -533,6 +544,8 @@ class Hud(Gtk.Window):
         outer.pack_start(self.legend, False, False, 0)
         row1 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.legend_row1 = row1
+        self.legend_row2 = row2
         self.legend.pack_start(row1, False, False, 0)
         self.legend.pack_start(row2, False, False, 0)
         row1.pack_start(self._keycap(["P"], "pause / resume", "pause"), False, False, 0)
@@ -548,10 +561,13 @@ class Hud(Gtk.Window):
 
         # -- overlay keyboard -------------------------------------------
         recent_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.recent_row = recent_row
         outer.pack_start(recent_row, False, False, 0)
         recent_row.pack_start(self._label("RECENT KEYS", "recent"), False, False, 0)
         self.recent_caps = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         recent_row.pack_start(self.recent_caps, True, True, 0)
+
+        self._build_task_section(outer)
 
         self.keyboard_grid = Gtk.Grid(row_spacing=3, column_spacing=2)
         self.keyboard_grid.set_border_width(4)
@@ -566,6 +582,7 @@ class Hud(Gtk.Window):
         outer.pack_start(self.compact_legend, False, False, 0)
 
         footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.footer = footer
         outer.pack_start(footer, False, False, 0)
         self.hint = self._label("", "hint")
         self.hint.set_size_request(230, -1)
@@ -591,7 +608,240 @@ class Hud(Gtk.Window):
         self.resize_label.set_xalign(0.5)
         self.resize_label.set_yalign(0.5)
         self.resize_box.add(self.resize_label)
+        self.resize_box.set_tooltip_text("Resize")
         footer.pack_start(self.resize_box, False, False, 0)
+
+    def _build_task_section(self, outer) -> None:
+        self.task_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        outer.pack_start(self.task_row, False, False, 0)
+        self.task_row.pack_start(self._label("TASK", "recent"), False, False, 0)
+        self.task_status = self._label("idle", "hint")
+        self.task_status.set_max_width_chars(34)
+        self.task_row.pack_start(self.task_status, True, True, 0)
+        self.task_play = Gtk.Button(label="▶")
+        self.task_play.set_relief(Gtk.ReliefStyle.NONE)
+        self.task_play.set_tooltip_text("Start task")
+        self.task_play.connect("clicked", lambda *_: self._task_start_stop())
+        self.task_row.pack_start(self.task_play, False, False, 0)
+        self.task_expander = Gtk.Button(label="✎")
+        self.task_expander.set_relief(Gtk.ReliefStyle.NONE)
+        self.task_expander.set_tooltip_text("Edit repeat task")
+        self.task_expander.connect("clicked", lambda *_: self._toggle_editor())
+        self.task_row.pack_start(self.task_expander, False, False, 0)
+        edge = Gtk.Box()
+        edge.set_size_request(6, -1)
+        self.task_row.pack_start(edge, False, False, 0)
+
+        self.task_scroll = Gtk.ScrolledWindow()
+        self.task_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.task_scroll.set_size_request(-1, 150)
+        outer.pack_start(self.task_scroll, False, False, 0)
+        editor = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.task_editor = editor
+        self.task_scroll.add(editor)
+
+        type_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.entry_type = Gtk.Entry()
+        self.entry_type.set_placeholder_text("Text to type")
+        type_row.pack_start(self.entry_type, True, True, 0)
+        add_type = Gtk.Button(label="+ type")
+        add_type.connect("clicked", lambda *_: self._add_step("type", self.entry_type.get_text()))
+        type_row.pack_start(add_type, False, False, 0)
+        editor.pack_start(type_row, False, False, 0)
+
+        key_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.entry_key = Gtk.Entry()
+        self.entry_key.set_placeholder_text("Press (xdotool)")
+        key_row.pack_start(self.entry_key, True, True, 0)
+        add_key = Gtk.Button(label="+ key")
+        add_key.connect("clicked", lambda *_: self._add_step("key", self.entry_key.get_text()))
+        key_row.pack_start(add_key, False, False, 0)
+        self.entry_wait = Gtk.Entry()
+        self.entry_wait.set_placeholder_text("Wait s")
+        self.entry_wait.set_width_chars(6)
+        key_row.pack_start(self.entry_wait, False, False, 0)
+        add_wait = Gtk.Button(label="+ wait")
+        add_wait.connect("clicked", lambda *_: self._add_step("wait", self.entry_wait.get_text()))
+        key_row.pack_start(add_wait, False, False, 0)
+        editor.pack_start(key_row, False, False, 0)
+
+        self.steps_label = self._label("no steps", "hint", wrap=True)
+        self.steps_label.set_max_width_chars(56)
+        editor.pack_start(self.steps_label, False, False, 0)
+
+        repeat_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.repeat_buttons = {}
+        for label, mode in (("∞", "infinite"), ("×N", "count"), ("Nm", "duration")):
+            button = Gtk.Button(label=label)
+            button.connect("clicked", lambda _b, m=mode: self._set_repeat_mode(m))
+            repeat_row.pack_start(button, False, False, 0)
+            self.repeat_buttons[mode] = button
+        self.spin_count = Gtk.SpinButton.new_with_range(1, 10000, 1)
+        self.spin_count.set_value(1)
+        self.spin_count.connect("value-changed", lambda *_: self._sync_repeat())
+        repeat_row.pack_start(self.spin_count, False, False, 0)
+        self.spin_minutes = Gtk.SpinButton.new_with_range(1, 480, 1)
+        self.spin_minutes.set_value(30)
+        self.spin_minutes.connect("value-changed", lambda *_: self._sync_repeat())
+        repeat_row.pack_start(self.spin_minutes, False, False, 0)
+        editor.pack_start(repeat_row, False, False, 0)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        start = Gtk.Button(label="Start")
+        start.connect("clicked", lambda *_: self._task_start())
+        actions.pack_start(start, False, False, 0)
+        stop = Gtk.Button(label="Stop")
+        stop.connect("clicked", lambda *_: self._task_stop())
+        actions.pack_start(stop, False, False, 0)
+        actions.pack_start(Gtk.Box(), True, True, 0)
+        close = Gtk.Button(label="close")
+        close.connect("clicked", lambda *_: self._toggle_editor(False))
+        actions.pack_start(close, False, False, 0)
+        editor.pack_start(actions, False, False, 0)
+        self.task_scroll.show_all()
+        self.task_scroll.hide()
+
+    def _task_model_payload(self) -> dict:
+        return {
+            "name": "hud",
+            "steps": self._task_steps,
+            "repeat": dict(self._task_repeat),
+            "interval_s": 0,
+            "enabled": True,
+        }
+
+    def _refresh_steps_label(self) -> None:
+        if not self._task_steps:
+            self.steps_label.set_text("no steps")
+            return
+        parts = []
+        for step in self._task_steps:
+            if step["kind"] == "wait":
+                parts.append(f"wait {step['seconds']:g}s")
+            elif step["kind"] == "type":
+                parts.append(f"type {step['value'][:12]}")
+            else:
+                parts.append(step["value"])
+        self.steps_label.set_text(" · ".join(parts))
+
+    def _save_task(self) -> None:
+        payload = self._task_model_payload()
+        threading.Thread(target=lambda: post_json("/api/task", payload), daemon=True).start()
+
+    def _add_step(self, kind: str, raw: str) -> None:
+        value = (raw or "").strip()
+        if not value or len(self._task_steps) >= 20:
+            return
+        if kind == "wait":
+            try:
+                seconds = float(value)
+            except ValueError:
+                return
+            step = {"kind": "wait", "seconds": seconds}
+        else:
+            step = {"kind": kind, "value": value}
+        self._task_steps.append(step)
+        self._refresh_steps_label()
+        self._save_task()
+        self._fit_editor()
+
+    def _set_repeat_mode(self, mode: str) -> None:
+        self._task_repeat["mode"] = mode
+        self._sync_repeat()
+
+    def _sync_repeat(self) -> None:
+        self._task_repeat["count"] = int(self.spin_count.get_value())
+        self._task_repeat["minutes"] = int(self.spin_minutes.get_value())
+        self._save_task()
+
+    def _task_start(self) -> None:
+        self._save_task()
+        threading.Thread(target=lambda: post("/api/task/start"), daemon=True).start()
+
+    def _task_stop(self) -> None:
+        threading.Thread(target=lambda: post("/api/task/stop"), daemon=True).start()
+
+    def _task_start_stop(self) -> None:
+        status = (self.state or {}).get("task") or {}
+        (self._task_stop if status.get("running") else self._task_start)()
+
+    def _toggle_editor(self, force: bool | None = None) -> None:
+        open_editor = (not self._editor_open) if force is None else force
+        self._editor_open = open_editor
+        if open_editor:
+            if not self._closed_height:
+                self._closed_height = self._height
+            self.task_scroll.show_all()
+            self.set_accept_focus(True)
+            self.entry_type.grab_focus()
+            self.task_expander.set_label("✕")
+            self.task_expander.set_tooltip_text("Close editor")
+        else:
+            self._closed_height = 0
+            self.task_scroll.hide()
+            self.task_expander.set_label("✎")
+            self.task_expander.set_tooltip_text("Edit repeat task")
+            self.set_accept_focus(False)
+        self._fit_editor()
+        if not open_editor and self._closed_height:
+            width = max(366, int(self._base_width() * self._scale))
+            hints = Gdk.Geometry()
+            hints.min_width = hints.max_width = width
+            hints.min_height = hints.max_height = self._closed_height
+            self.set_geometry_hints(None, hints, Gdk.WindowHints.MIN_SIZE | Gdk.WindowHints.MAX_SIZE)
+            self.set_size_request(width, self._closed_height)
+            self.resize(width, self._closed_height)
+            self._height = self._closed_height
+            self._closed_height = 0
+        self._click_through()
+
+    def _fit_editor(self) -> None:
+        target = self.target or {}
+        target_height = int(target.get("h") or 0)
+        max_height = 420
+        if target_height:
+            max_height = max(120, min(max_height, target_height - 260))
+        if self._editor_open:
+            _, natural = self.task_editor.get_preferred_height()
+            height = int(210 * self._scale)
+            height = min(max(height, int(natural) + 4), max_height)
+        else:
+            height = 1
+        self.task_scroll.set_size_request(-1, height)
+        if self._editor_open and self._closed_height:
+            total = max(self._height, self._closed_height + height + int(8 * self._scale))
+            hints = Gdk.Geometry()
+            hints.min_width = hints.max_width = max(366, int(self._base_width() * self._scale))
+            hints.min_height = hints.max_height = total
+            self.set_geometry_hints(None, hints, Gdk.WindowHints.MIN_SIZE | Gdk.WindowHints.MAX_SIZE)
+            self.set_size_request(hints.min_width, total)
+            self.resize(hints.min_width, total)
+            self._height = total
+        else:
+            self._fit(int(target.get("w") or 0))
+
+    def _render_task(self, state: dict) -> None:
+        if not self._editor_open:
+            self.task_scroll.hide()
+        status = state.get("task") or {}
+        running = bool(status.get("running"))
+        name = status.get("name") or "idle"
+        has_task = name != "idle"
+        if running:
+            cycles = status.get("cycles_done", 0)
+            self.task_status.set_text(f"{name} · {cycles} cycles · running")
+            self.task_play.set_label("■")
+            self.task_play.set_tooltip_text("Stop task")
+        elif has_task:
+            cycles = status.get("cycles_done", 0)
+            last = status.get("last_result") or "idle"
+            self.task_status.set_text(f"{name} · {cycles} cycles · {last}")
+            self.task_play.set_label("▶")
+            self.task_play.set_tooltip_text("Start task")
+        else:
+            self.task_status.set_text("idle")
+            self.task_play.set_label("▶")
+            self.task_play.set_tooltip_text("Start task")
 
     def _build_keyboard(self) -> None:
         layout = [
@@ -665,12 +915,14 @@ class Hud(Gtk.Window):
         gdk_window = self.get_window()
         if gdk_window is None:
             return
-        if self._interacting:
+        if self._interacting or self._editor_open:
             self._set_full_input_shape()
             return
         rects = [rect for rect in (self._drag_rect(), self._x_rect(), self._resize_rect()) if rect]
         if self._pause_enabled:
             rects.append(self._pause_rect())
+        if hasattr(self, "task_row") and not self._editor_open:
+            rects.append(self._widget_rect(self.task_row))
         try:
             region = cairo.Region()
             for x, y, width, height in rects:
@@ -892,7 +1144,7 @@ class Hud(Gtk.Window):
 
     def _scaled_width(self, target_width: int | None = None) -> int:
         width = int(round(self._base_width() * self._scale))
-        width = max(366, min(774, width))
+        width = max(366, width)
         if target_width:
             width = min(width, max(240, int(target_width) - 2 * MARGIN))
         return width
@@ -902,6 +1154,8 @@ class Hud(Gtk.Window):
         child = self.get_child()
         _, natural_h = child.get_preferred_height() if child is not None else (0, MIN_H)
         height = max(MIN_H, int(natural_h))
+        if getattr(self, "_editor_open", False):
+            height = max(height, int(self._height))
         if width == self._width and height == self._height:
             return
         self._width, self._height = width, height
@@ -921,15 +1175,38 @@ class Hud(Gtk.Window):
                 int(KEY_H * self._scale),
             )
 
+    def _apply_metrics(self) -> None:
+        scale = self._scale
+
+        def p(value: float, minimum: int = 1) -> int:
+            return max(minimum, int(round(value * scale)))
+
+        self.outer.set_border_width(p(8))
+        self.outer.set_spacing(p(2))
+        self.header.set_spacing(p(6))
+        self.live_row.set_spacing(p(10))
+        self.legend.set_spacing(p(3))
+        self.legend_row1.set_spacing(p(10))
+        self.legend_row2.set_spacing(p(10))
+        self.recent_row.set_spacing(p(4))
+        self.keyboard_grid.set_row_spacing(p(3))
+        self.keyboard_grid.set_column_spacing(p(2))
+        self.keyboard_grid.set_border_width(p(4))
+        self.footer.set_spacing(p(6))
+        for box in (self.pause_box, self.close_box):
+            size = max(22, p(22))
+            box.set_size_request(size, size)
+        self.resize_box.set_size_request(max(18, p(18)), max(18, p(18)))
+        self.canvas.set_size_request(int(120 * scale), int(48 * scale))
+        self._scale_keyboard()
+
     def _apply_scale(self, scale: float, *, persist: bool = False) -> None:
-        scale = max(0.85, min(1.8, float(scale)))
+        scale = max(0.85, min(2.0, float(scale)))
         if abs(scale - self._scale) < 0.0005 and not persist:
             return
         self._scale = scale
         self._apply_css()
-        if hasattr(self, "canvas"):
-            self.canvas.set_size_request(int(120 * scale), int(48 * scale))
-        self._scale_keyboard()
+        self._apply_metrics()
         target_width = int((self.target or {}).get("w") or 0)
         self._fit(target_width)
         if not self._interacting:
@@ -1072,9 +1349,9 @@ class Hud(Gtk.Window):
         self._offset = (int(hud.get("offset_x") or 12), int(hud.get("offset_y") or 12))
         self._set_mode_label(self._hud_mode)
         try:
-            state_scale = max(0.85, min(1.8, float(hud.get("scale") or 1.0)))
+            state_scale = max(0.85, min(2.0, float(hud.get("scale") or 1.35)))
         except (TypeError, ValueError):
-            state_scale = 1.0
+            state_scale = 1.35
         if abs(state_scale - self._scale) > 0.001 and not self._interacting:
             self._apply_scale(state_scale)
         if self._hud_visible and time.time() < self._suppress_until:
@@ -1115,6 +1392,7 @@ class Hud(Gtk.Window):
         self.live.set_text(f"{lead} · {steps} steps · {distance:.0f}px · {avg:.0f}/{peak:.0f} px/s")
         self._emphasise("locked" if locked else "paused" if paused else "armed" if armed else "idle")
         self._render_keyboard(state)
+        self._render_task(state)
 
         if self.target is None:
             self.target_label.set_text("no target")

@@ -39,7 +39,7 @@ def test_mcp_handshake_without_display():
     """The server must complete initialize/tools-list even with no X server."""
     params = _params({"MOUSE_DRIVER_FORCE_NO_X": "1"}, drop=("DISPLAY", "MOUSE_DRIVER_DRY"))
     count, status = anyio.run(_handshake, params)
-    assert count == 15
+    assert count == 19
     assert status["ok"] is False
     assert status["driver"] == "unavailable"
     assert status["error"] == "XOpenDisplay failed"
@@ -69,6 +69,6 @@ def test_mcp_handshake_with_default_display_env():
     """With DISPLAY removed the server defaults it and still handshakes."""
     params = _params({}, drop=("DISPLAY", "MOUSE_DRIVER_DRY"))
     count, status = anyio.run(_handshake, params)
-    assert count == 15
+    assert count == 19
     assert status["ok"] is True
     assert status["backend"] in {"xtest", "xdotool"}

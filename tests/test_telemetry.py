@@ -34,10 +34,11 @@ def test_state_shape(store, guard, driver):
         "keys_recent",
         "hud_visible",
         "hud",
+        "task",
     }
     assert state["target"] is None
     assert state["hud"]["mode"] in {"auto", "custom"}
-    assert 0.85 <= state["hud"]["scale"] <= 1.8
+    assert 0.85 <= state["hud"]["scale"] <= 2.0
     assert set(state["cursor"]) == {"x", "y"}
     assert set(state["screen"]) == {"w", "h", "monitors"}
     assert state["screen"] == {"w": 5120, "h": 1440, "monitors": 2}
@@ -170,3 +171,33 @@ def test_target_file_is_shared_between_instances(tmp_path, monkeypatch):
     # Another instance writes a different window; the first one must see it.
     path.write_text('{"id": 27262979, "updated": 2}\n')
     assert service._load_target() == 27262979
+
+
+def test_task_status_uses_the_file_after_a_finished_runner(tmp_path, monkeypatch):
+    import mouse_driver.control as control
+
+    path = tmp_path / "task.json"
+    monkeypatch.setattr(control, "TASK_PATH", path)
+    control.task_model.save_task(
+        path,
+        {
+            "name": "new-task",
+            "steps": [{"kind": "key", "value": "a"}],
+            "repeat": {"mode": "count", "count": 1},
+            "interval_s": 0,
+        },
+    )
+
+    class DeadRunner:
+        def is_alive(self):
+            return False
+
+        def snapshot(self):
+            return {"name": "old-task", "running": False}
+
+    service = object.__new__(control.MouseService)
+    service.task_runner = DeadRunner()
+    status = service.task_status()
+    assert status["name"] == "new-task"
+    assert status["steps"] == 1
+    assert service.task_runner is None

@@ -160,6 +160,18 @@ presses. It never accepts input and never blocks a click.
   events only (`mouse_type`, `mouse_key`). A passive grab on typing keys was
   rejected on purpose.
 
+## Repeat task
+
+The panel's `TASK` row and the driver share one model in `data/task.json`
+(1–20 steps of `key`/`type`/`wait`, repeat `infinite`/`count`/`duration`,
+`interval_s`). `mouse_task_set/start/stop/status`, `mouse-driver task ...` and
+the editor's Start/Stop all use it. A task never arms itself: start requires an
+armed session, and it stops on pause, lock, panic, STOP, disarm or an expired
+TTL, with hard caps of 10 000 cycles or 8 hours. The HUD editor opens from `▸`
+below `RECENT KEYS`; while open the panel takes input (for the entries) instead
+of being click-through, and `close` restores pass-through. Chords are unaffected
+because only modifier combos are grabbed.
+
 ## Tools
 
 | Tool | Purpose |
@@ -179,6 +191,9 @@ presses. It never accepts input and never blocks a click.
 | `mouse_focus_window(title)` | Focus by title substring; sets the HUD target. |
 | `mouse_telemetry(limit)` | `/api/state` payload plus recent sessions. Read-only. |
 | `mouse_replay_session(id,speed)` | Visual replay of a recorded path, no clicks. |
+| `mouse_task_set(name,steps,repeat,interval_s,enabled)` | Validate and save the repeat task. |
+| `mouse_task_start` / `mouse_task_stop` | Run or stop it (start requires arm). |
+| `mouse_task_status` | Task model plus runner status. Read-only. |
 
 There is intentionally no `mouse_unlock` and no `mouse_resume`.
 

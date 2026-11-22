@@ -233,6 +233,65 @@ def mouse_telemetry(limit: int = 20) -> str:
 
 
 @mcp.tool(
+    name="mouse_task_set",
+    description=(
+        "Save the repeat-task model (1–20 steps of key/type/wait, repeat infinite/count/duration, "
+        "interval_s). The task never arms itself; starting requires mouse_arm."
+    ),
+    annotations=WRITE,
+)
+def mouse_task_set(
+    name: str,
+    steps: list[dict],
+    repeat: dict | None = None,
+    interval_s: float = 0,
+    enabled: bool = False,
+) -> str:
+    return _guard_call(
+        "mouse_task_set",
+        _svc().task_set,
+        {
+            "name": name,
+            "steps": steps,
+            "repeat": repeat or {"mode": "count", "count": 1, "minutes": 30},
+            "interval_s": interval_s,
+            "enabled": enabled,
+        },
+    )
+
+
+@mcp.tool(
+    name="mouse_task_start",
+    description=(
+        "Start the saved repeat task. Requires arm; it stops on pause, lock, panic, STOP, disarm or an "
+        "expired TTL, and is capped at 10 000 cycles / 8 hours."
+    ),
+    annotations=ACT,
+)
+def mouse_task_start() -> str:
+    return _guard_call("mouse_task_start", _svc().task_start)
+
+
+@mcp.tool(
+    name="mouse_task_stop",
+    description="Stop the repeat task (safe while disarmed).",
+    annotations=ACT,
+)
+def mouse_task_stop() -> str:
+    return _json(_svc().task_stop())
+
+
+@mcp.tool(
+    name="mouse_task_status",
+    description="Read the task model and runner status (name, running, cycle, cycles_done, next_at, last_result). Read-only.",
+    annotations=READ,
+)
+def mouse_task_status() -> str:
+    service = _svc()
+    return _json({"ok": True, "task": service.task_model(), "status": service.task_status()})
+
+
+@mcp.tool(
     name="mouse_replay_session",
     description=(
         "Visually replay a recorded session path (downsampled to at most 1200 points) with no clicks, at "

@@ -332,6 +332,8 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/api/stream":
             self._stream()
             return
+        elif path == "/api/task":
+            payload = api.task_get()
         elif path == "/api/sessions":
             payload = {"ok": True, "sessions": api.store.sessions(20)}
         elif path.startswith("/api/sessions/"):
@@ -388,6 +390,12 @@ class _Handler(BaseHTTPRequestHandler):
             payload = api.set_hud_scale(self._json_body())
         elif path == "/api/hud/offset":
             payload = api.set_hud_offset(self._json_body())
+        elif path == "/api/task":
+            payload = api.task_set(self._json_body())
+        elif path == "/api/task/start":
+            payload = api.task_start()
+        elif path == "/api/task/stop":
+            payload = api.task_stop()
         else:
             self._send_json({"ok": False, "error": "not found"}, HTTPStatus.NOT_FOUND)
             return
@@ -502,17 +510,30 @@ class TelemetryAPI:
             from .control import read_hud_state
 
             hud = read_hud_state()
-            return {"keyboard_expanded": False, "keys_recent": [], "hud_visible": hud["visible"], "hud": hud}
+            return {
+                "keyboard_expanded": False,
+                "keys_recent": [],
+                "hud_visible": hud["visible"],
+                "hud": hud,
+                "task": None,
+            }
         try:
             payload = self.keyboard_provider()
             payload.setdefault("hud_visible", True)
             payload.setdefault("hud", {"visible": payload["hud_visible"], "mode": "auto", "x": 0, "y": 0})
+            payload.setdefault("task", None)
             return payload
         except Exception:
             from .control import read_hud_state
 
             hud = read_hud_state()
-            return {"keyboard_expanded": False, "keys_recent": [], "hud_visible": hud["visible"], "hud": hud}
+            return {
+                "keyboard_expanded": False,
+                "keys_recent": [],
+                "hud_visible": hud["visible"],
+                "hud": hud,
+                "task": None,
+            }
 
     def toggle_hud(self) -> dict:
         if self.control is not None:
@@ -557,6 +578,32 @@ class TelemetryAPI:
         if x is not None and y is not None:
             patch["x"], patch["y"] = int(x), int(y)
         return write_hud_state(**patch)
+
+    def task_get(self) -> dict:
+        if self.control is None:
+            return {"ok": False, "error": "task state unavailable"}
+        return {"ok": True, "task": self.control.task_model(), "status": self.control.task_status()}
+
+    def task_set(self, body: dict) -> dict:
+        if self.control is None:
+            return {"ok": False, "error": "task state unavailable"}
+        try:
+            return self.control.task_set(body)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def task_start(self) -> dict:
+        if self.control is None:
+            return {"ok": False, "error": "task state unavailable"}
+        try:
+            return self.control.task_start()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "code": getattr(exc, "code", "refused")}
+
+    def task_stop(self) -> dict:
+        if self.control is None:
+            return {"ok": False, "error": "task state unavailable"}
+        return self.control.task_stop()
 
     def set_hud_scale(self, body: dict) -> dict:
         if "scale" not in body:

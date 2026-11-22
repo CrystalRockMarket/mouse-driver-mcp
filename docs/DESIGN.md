@@ -155,8 +155,10 @@ addition. Session rows carry a few extra keys (`started_at`, `ended_at`,
     "offset_x": 12,              // from the target's right edge to the panel's right
     "offset_y": 12,              // from the target's top edge
     "x": 2118, "y": 12,          // last realised screen position (telemetry)
-    "scale": 1.0                 // 0.85–1.8
+    "scale": 1.35                // 0.85–2.0, default 1.35
   },
+  "task": {"name": "demo", "running": false, "cycle": 2, "cycles_done": 2,
+           "next_at": null, "last_result": "finished", "error": null},
   "keyboard_expanded": false,         // overlay keyboard state (persisted)
   "keys_recent": [                    // last 2 s of keys, max 24, oldest → newest
     {"key": "Ctrl+Alt+Shift+T", "code": 0, "t": 1795299546.49, "source": "driver"}
@@ -186,6 +188,7 @@ addition. Session rows carry a few extra keys (`started_at`, `ended_at`,
 //      /api/hud/position {"x":int,"y":int,"mode":"manual"} | /api/hud/reset
 //      /api/hud/scale {"scale": 0.85..1.8}
 //      /api/hud/offset {"offset_x":int,"offset_y":int,"mode":"custom","x":int,"y":int}
+// GET/POST /api/task, /api/task/start, /api/task/stop
 {"ok": true, ...}
 ```
 

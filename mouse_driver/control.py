@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import motion
+from . import motion, task as task_model
 from .config import ARM_DEFAULT_TTL_S, DATA_DIR, ensure_dirs
 from .guard import Guard, GuardError
 from .telemetry import Store, TelemetryAPI
@@ -25,6 +25,7 @@ MAX_DRAG_SEGMENT_S = 2.5
 TARGET_PATH = DATA_DIR / "target.json"
 KEYBOARD_PATH = DATA_DIR / "keyboard.json"
 HUD_PATH = DATA_DIR / "hud.json"
+TASK_PATH = DATA_DIR / "task.json"
 KEYS_WINDOW_S = 2.0
 KEYS_MAX = 24
 
@@ -49,6 +50,9 @@ SPECIAL_LABELS = {
 }
 
 
+HUD_SCALE_MIN, HUD_SCALE_MAX = 0.85, 2.0
+HUD_SCALE_DEFAULT = 1.35
+
 HUD_DEFAULTS = {
     "visible": True,
     "mode": "auto",
@@ -56,9 +60,8 @@ HUD_DEFAULTS = {
     "offset_y": 12,
     "x": 0,
     "y": 0,
-    "scale": 1.0,
+    "scale": HUD_SCALE_DEFAULT,
 }
-HUD_SCALE_MIN, HUD_SCALE_MAX = 0.85, 1.8
 _HUD_CACHE: dict = {"mtime": -1.0, "state": dict(HUD_DEFAULTS)}
 
 
@@ -86,9 +89,9 @@ def read_hud_state() -> dict:
         state["mode"] = "custom" if state["mode"] == "custom" else "auto"
         state["x"], state["y"] = int(state["x"] or 0), int(state["y"] or 0)
         try:
-            state["scale"] = min(HUD_SCALE_MAX, max(HUD_SCALE_MIN, float(state.get("scale") or 1.0)))
+            state["scale"] = min(HUD_SCALE_MAX, max(HUD_SCALE_MIN, float(state.get("scale") or HUD_SCALE_DEFAULT)))
         except (TypeError, ValueError):
-            state["scale"] = 1.0
+            state["scale"] = HUD_SCALE_DEFAULT
         _HUD_CACHE.update({"mtime": mtime, "state": state})
     return dict(_HUD_CACHE["state"])
 
@@ -102,9 +105,9 @@ def write_hud_state(**patch) -> dict:
     state["offset_y"] = int(state.get("offset_y") or 12)
     state["x"], state["y"] = int(state.get("x") or 0), int(state.get("y") or 0)
     try:
-        state["scale"] = min(HUD_SCALE_MAX, max(HUD_SCALE_MIN, float(state.get("scale") or 1.0)))
+        state["scale"] = min(HUD_SCALE_MAX, max(HUD_SCALE_MIN, float(state.get("scale") or HUD_SCALE_DEFAULT)))
     except (TypeError, ValueError):
-        state["scale"] = 1.0
+        state["scale"] = HUD_SCALE_DEFAULT
     try:
         HUD_PATH.parent.mkdir(parents=True, exist_ok=True)
         HUD_PATH.write_text(json.dumps(state) + "\n", encoding="utf-8")
@@ -149,6 +152,7 @@ class MouseService:
         self.started_at = time.time()
         self._target_id = self._load_target()
         self._keys: list[dict] = []
+        self.task_runner = None
         self._keys_lock = threading.Lock()
         self.api = TelemetryAPI(
             self.store,
@@ -163,6 +167,7 @@ class MouseService:
         if start_api:
             self.api_error = self.api.start().get("error")
         self.guard.add_disarm_hook(lambda reason: self.store.add_event("disarm", reason))
+        self.guard.add_disarm_hook(self._task_disarm_hook)
         atexit.register(self.close)
 
     # -- lifecycle -------------------------------------------------------
@@ -271,6 +276,69 @@ class MouseService:
             "armed": self.guard.is_armed(),
         }
 
+    # -- repeat task ------------------------------------------------------
+    def _task_disarm_hook(self, reason: str) -> None:
+        if self.task_runner is not None:
+            self.task_runner.stop(f"disarmed ({reason})")
+
+    def task_model(self) -> dict | None:
+        return task_model.load_task(TASK_PATH)
+
+    def task_set(self, data: dict) -> dict:
+        model = task_model.save_task(TASK_PATH, data)
+        if self.task_runner is not None and not self.task_runner.is_alive():
+            self.task_runner = None
+        self.store.add_event("task", f"set {model['name']} {len(model['steps'])} steps")
+        return {"ok": True, "task": model}
+
+    def task_start(self) -> dict:
+        self._driver()
+        self.guard.require_armed("mouse_task_start")
+        model = self.task_model()
+        if model is None:
+            raise ValueError("no valid task: call mouse_task_set first")
+        if self.task_runner is not None and self.task_runner.is_alive():
+            self.task_runner.stop("restarted")
+            self.task_runner.join(timeout=2)
+        runner = task_model.TaskRunner(self, model)
+        self.task_runner = runner
+        runner.start()
+        self.store.add_event("task", f"start {model['name']}")
+        return {"ok": True, "task": runner.snapshot()}
+
+    def task_stop(self) -> dict:
+        if self.task_runner is None:
+            return {"ok": True, "task": self.task_status(), "note": "not running"}
+        self.task_runner.stop("stopped by operator")
+        self.task_runner.join(timeout=2)
+        snapshot = self.task_runner.snapshot()
+        self.store.add_event("task", "stop")
+        return {"ok": True, "task": snapshot}
+
+    def task_status(self) -> dict:
+        # A finished runner is history: the file is the current model, so a new
+        # task saved after a run shows its own name and steps immediately.
+        if self.task_runner is not None and self.task_runner.is_alive():
+            snapshot = self.task_runner.snapshot()
+            model = self.task_model() or {}
+            snapshot.setdefault("steps", len(model.get("steps") or []))
+            snapshot.setdefault("repeat", model.get("repeat"))
+            return snapshot
+        if self.task_runner is not None:
+            self.task_runner = None
+        model = self.task_model()
+        return {
+            "name": (model or {}).get("name") or "idle",
+            "running": False,
+            "cycle": 0,
+            "cycles_done": 0,
+            "next_at": None,
+            "last_result": "idle",
+            "error": None,
+            "steps": len((model or {}).get("steps") or []),
+            "repeat": (model or {}).get("repeat"),
+        }
+
     # -- keyboard telemetry ----------------------------------------------
     def _load_keyboard(self) -> bool:
         try:
@@ -360,6 +428,7 @@ class MouseService:
             "keys_recent": self.keys_recent(),
             "hud_visible": self.hud_visible(),
             "hud": self.hud_state(),
+            "task": self.task_status(),
         }
 
     # -- target window ---------------------------------------------------
